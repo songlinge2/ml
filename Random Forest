@@ -1,0 +1,155 @@
+import time
+import pandas as pd
+import numpy as np
+from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.multioutput import MultiOutputRegressor  # 新增多输出包装器
+from xgboost import XGBRegressor
+from lightgbm import LGBMRegressor
+from scipy import stats
+
+start_time = time.time()
+
+# 特征标准化
+scaler = StandardScaler()
+
+# 加载数据集（请根据实际路径修改）
+train_dataSet = pd.read_csv(r'D:\yanjius\机器学习\ML期末代码比赛\ML期末代码比赛\加噪数据集\加噪数据集\modified_数据集Time_Series661_detail.dat')
+test_dataSet = pd.read_csv(r'D:\yanjius\机器学习\ML期末代码比赛\ML期末代码比赛\加噪数据集\加噪数据集\modified_数据集Time_Series662_detail.dat')
+
+
+# 定义特征列和目标列
+columns = ['T_SONIC', 'CO2_density', 'CO2_density_fast_tmpr', 'H2O_density', 'H2O_sig_strgth', 'CO2_sig_strgth']
+noise_columns = ['Error_T_SONIC', 'Error_CO2_density', 'Error_CO2_density_fast_tmpr', 'Error_H2O_density',
+                 'Error_H2O_sig_strgth', 'Error_CO2_sig_strgth']
+
+CL = columns + noise_columns
+
+## 查看数据缺失情况
+data = train_dataSet[CL]
+missingDf = data.isnull().sum().sort_values(ascending=False).reset_index()
+missingDf.columns = ['feature', 'miss_num']
+missingDf['miss_percentage'] = missingDf['miss_num'] / data.shape[0]
+print("缺失值比例")
+print(missingDf)
+
+
+# 计算异常值比例（Z分数法）
+outlier_ratios = {}
+for column in CL:
+    # 排除缺失值再计算Z分数
+    z_scores = np.abs(stats.zscore(train_dataSet[column].dropna()))
+    outliers = (z_scores > 2)  # Z分数大于2视为异常值
+    outlier_ratio = outliers.mean() if len(outliers) > 0 else 0
+    outlier_ratios[column] = outlier_ratio
+
+print("*"*30)
+print("异常值的比例:")
+for column, ratio in outlier_ratios.items():
+    print(f"{column}: {ratio:.2%}")
+
+
+# 处理缺失值（使用列均值填充）
+X_train = train_dataSet[noise_columns].fillna(train_dataSet[noise_columns].mean())
+y_train = train_dataSet[columns].fillna(train_dataSet[columns].mean())
+X_test = test_dataSet[noise_columns].fillna(test_dataSet[noise_columns].mean())
+y_test = test_dataSet[columns].fillna(test_dataSet[columns].mean())
+
+
+def evaluate_model(y_true, y_pred, model_name):
+    """统一模型评估函数"""
+    r2 = r2_score(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    column_errors = np.abs(y_true - y_pred).mean(axis=0)
+    avg_error = column_errors.mean()
+    
+    print(f"\n【{model_name} 评估结果】")
+    print(f"R2分数: {r2:.4f}")
+    print(f"MSE: {mse:.4f}")
+    print("各列平均误差:")
+    for col, err in zip(columns, column_errors):
+        print(f"  {col}: {err:.4f}")
+    print(f"整体平均误差: {avg_error:.4f}")
+    
+    return {
+        'model': model_name,
+        'r2': r2,
+        'mse': mse,
+        'avg_error': avg_error,
+        'y_pred': y_pred
+    }
+
+
+# 定义待比较的模型（使用MultiOutputRegressor包装以支持多输出）
+models = {
+    # XGBoost模型（多输出包装）
+    'XGBoost': MultiOutputRegressor(XGBRegressor(
+        seed=217,
+        booster='gbtree',
+        max_depth=5,
+        n_estimators=200,
+        learning_rate=0.1,
+        reg_alpha=10,
+        reg_lambda=6,
+        min_child_weight=5,
+        colsample_bytree=0.85,
+        subsample=0.6
+    )),
+    # LightGBM模型（多输出包装）
+    'LightGBM': MultiOutputRegressor(LGBMRegressor(
+        random_state=217,
+        n_estimators=200,
+        learning_rate=0.1,
+        max_depth=5,
+        num_leaves=31,
+        subsample=0.6,
+        colsample_bytree=0.85,
+        reg_alpha=10,
+        reg_lambda=6
+    )),
+    # 随机森林模型（多输出包装）
+    'RandomForest': MultiOutputRegressor(RandomForestRegressor(
+        random_state=217,
+        n_estimators=150,
+        max_depth=10,
+        min_samples_split=7,
+        min_samples_leaf=2,
+        n_jobs=-1
+    ))
+}
+
+# 训练并评估所有模型
+results = []
+for name, model in models.items():
+    print(f"\n训练{name}模型...")
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    eval_result = evaluate_model(y_test, y_pred, name)
+    results.append(eval_result)
+
+# 选择最优模型
+best_model = max(results, key=lambda x: (x['r2'], -x['mse'], -x['avg_error']))
+print("\n" + "*"*50)
+print(f"最优模型: {best_model['model']}")
+print(f"最优R2分数: {best_model['r2']:.4f}")
+print(f"最优MSE: {best_model['mse']:.4f}")
+print(f"最优整体平均误差: {best_model['avg_error']:.4f}")
+
+# 保存最优模型结果
+best_y_pred = best_model['y_pred']
+result_list = []
+for true_val, pred_val in zip(y_test.values, best_y_pred):
+    error = np.abs(true_val - pred_val)
+    formatted_true = ' '.join(map(lambda x: f"{x:.6f}", true_val))
+    formatted_pred = ' '.join(map(lambda x: f"{x:.6f}", pred_val))
+    formatted_error = ' '.join(map(lambda x: f"{x:.6f}", error))
+    result_list.append([formatted_true, formatted_pred, formatted_error])
+
+result_df = pd.DataFrame(result_list, columns=['True_Value', 'Predicted_Value', 'Error'])
+result_df.to_csv(f"result_{best_model['model']}.csv", index=False)
+print(f"\n最优模型结果已保存至: result_{best_model['model']}.csv")
+
+end_time = time.time()
+print(f"\n总耗时：{end_time - start_time : .3f}秒")
